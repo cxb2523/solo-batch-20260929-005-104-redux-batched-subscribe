@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>redux-batched-subscribe 状态面板</title>
+<style>
+  body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; margin: 2rem; background: #f5f6f8; color: #222; }
+  h1 { font-size: 1.3rem; }
+  .panel { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 1rem 1.5rem; max-width: 560px; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem 1.5rem; margin: 1rem 0; }
+  .stat { background: #f0f4ff; border-radius: 6px; padding: .6rem .9rem; }
+  .stat .label { font-size: .8rem; color: #667; }
+  .stat .value { font-size: 1.6rem; font-weight: 600; }
+  .stat.warn .value { color: #c0392b; }
+  button { font-size: .95rem; padding: .5rem 1rem; margin-right: .5rem; border: 1px solid #46a; border-radius: 6px; background: #5b7fc4; color: #fff; cursor: pointer; }
+  button:hover { background: #4a6db0; }
+  button.flush { background: #e67e22; border-color: #d35400; }
+  button.flush:hover { background: #d35400; }
+  #errors { margin-top: 1rem; }
+  #errors li { color: #c0392b; font-size: .85rem; }
+  #log { margin-top: 1rem; font-size: .8rem; color: #556; max-height: 140px; overflow-y: auto; border-top: 1px dashed #ccc; padding-top: .5rem; }
+  .note { font-size: .8rem; color: #889; margin-top: 1rem; }
+</style>
+</head>
+<body>
+<h1>redux-batched-subscribe 状态面板</h1>
+<div class="panel" id="app">
+  <div class="stats">
+    <div class="stat"><div class="label">累计 dispatch</div><div class="value" id="dispatchCount">0</div></div>
+    <div class="stat"><div class="label">listener 触发次数</div><div class="value" id="listenerHits">0</div></div>
+    <div class="stat warn"><div class="label">待通知订阅数</div><div class="value" id="pendingCount">0</div></div>
+    <div class="stat"><div class="label">当前 state</div><div class="value" id="stateValue">0</div></div>
+  </div>
+  <div>
+    <button id="dispatchOne">dispatch ×1</button>
+    <button id="dispatchThree">dispatch ×3（同 tick 合并）</button>
+    <button id="flushBtn" class="flush">手动 flush</button>
+  </div>
+  <ul id="errors"></ul>
+  <div id="log"></div>
+  <div class="note">
+    配置：batchedSubscribe({ maxBatchDelay: 1500 })。dispatch 后 1.5s 内可手动 flush；
+    超时自动通知。面板含一个固定抛错的订阅者，其余订阅者仍会收到通知，错误在 flush 收尾一并抛出。
+  </div>
+</div>
+
+<script>var exports = {}; var module = { exports: exports };</script>
+<script src="../lib/index.js"></script>
+<script>
+(function () {
+  var batchedSubscribe = (module.exports && module.exports.batchedSubscribe) || exports.batchedSubscribe;
+
+  if (typeof batchedSubscribe !== 'function') {
+    document.getElementById('app').innerHTML =
+      '<p style="color:#c0392b">未能加载真实模块 ../lib/index.js，请先在项目根目录运行 <code>npm run build</code>。</p>';
+    return;
+  }
+
+  function createStore(reducer, preloaded, enhancer) {
+    if (enhancer) {
+      return enhancer(createStore)(reducer, preloaded);
+    }
+    var state = preloaded;
+    var listeners = [];
+    return {
+      dispatch: function (action) { state = reducer(state, action); return action; },
+      subscribe: function (l) { listeners.push(l); return function () {
+        listeners.splice(listeners.indexOf(l), 1);
+      }; },
+      getState: function () { return state; }
+    };
+  }
+
+  function reducer(state, action) {
+    if (action.type === 'inc') { return state + 1; }
+    return state;
+  }
+
+  var store = createStore(reducer, 0, batchedSubscribe({ maxBatchDelay: 1500 }));
+
+  var dispatchCount = 0;
+  var listenerHits = 0;
+  var rawDispatch = store.dispatch;
+  store.dispatch = function (action) {
+    dispatchCount += 1;
+    return rawDispatch(action);
+  };
+
+  var el = function (id) { return document.getElementById(id); };
+  var logEl = el('log');
+
+  function log(msg) {
+    var line = document.createElement('div');
+    line.textContent = new Date().toLocaleTimeString() + '  ' + msg;
+    logEl.insertBefore(line, logEl.firstChild);
+  }
+
+  function renderErrors(errors) {
+    var ul = el('errors');
+    ul.innerHTML = '';
+    errors.forEach(function (err) {
+      var li = document.createElement('li');
+      li.textContent = 'flush 抛出：' + err.message;
+      ul.appendChild(li);
+    });
+  }
+
+  store.subscribe(function () {
+    listenerHits += 1;
+    log('统计 listener 收到通知，state = ' + store.getState());
+  });
+
+  store.subscribe(function () {
+    listenerHits += 1;
+    throw new Error('我是固定抛错的订阅者（state=' + store.getState() + '）');
+  });
+
+  store.subscribe(function () {
+    listenerHits += 1;
+    log('日志 listener 收到通知，state = ' + store.getState());
+  });
+
+  function refresh() {
+    el('dispatchCount').textContent = dispatchCount;
+    el('listenerHits').textContent = listenerHits;
+    el('pendingCount').textContent = store.getPendingCount();
+    el('stateValue').textContent = store.getState();
+  }
+
+  el('dispatchOne').addEventListener('click', function () {
+    store.dispatch({ type: 'inc' });
+    refresh();
+  });
+
+  el('dispatchThree').addEventListener('click', function () {
+    store.dispatch({ type: 'inc' });
+    store.dispatch({ type: 'inc' });
+    store.dispatch({ type: 'inc' });
+    refresh();
+  });
+
+  el('flushBtn').addEventListener('click', function () {
+    try {
+      store.flush();
+      renderErrors([]);
+    } catch (err) {
+      renderErrors(err.errors || [err]);
+    }
+    refresh();
+  });
+
+  window.addEventListener('error', function (event) {
+    if (event.error) {
+      renderErrors(event.error.errors || [event.error]);
+      refresh();
+    }
+  });
+
+  setInterval(refresh, 150);
+  refresh();
+})();
+</script>
+</body>
+</html>

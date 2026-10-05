@@ -8,13 +8,31 @@ function createStoreShape() {
   };
 }
 
-function createBatchedStore(batch = (cb) => cb()) {
+function createBatchedStore(options = (cb) => cb()) {
   const baseStore = createStoreShape();
   const createStore = () => baseStore;
-  const batchedStore = batchedSubscribe(batch)(createStore)();
+  const batchedStore = batchedSubscribe(options)(createStore)();
   batchedStore.base = baseStore;
 
   return batchedStore;
+}
+
+function createCounterStore() {
+  let state = 0;
+  return {
+    dispatch(action) {
+      if (action.type === 'inc') {
+        state += 1;
+      }
+      return action;
+    },
+    subscribe() {
+      return () => {};
+    },
+    getState() {
+      return state;
+    }
+  };
 }
 
 describe('batchedSubscribe()', () => {
@@ -201,17 +219,25 @@ describe('batchedSubscribe()', () => {
     expect(listener4.calls.length).toBe(1);
   });
 
-  it('should throw for invalid batch callback', () => {
+  it('should throw for invalid options', () => {
     expect(() => {
       batchedSubscribe(null);
     }).toThrow(Error);
 
     expect(() => {
-      batchedSubscribe(undefined);
+      batchedSubscribe('foo');
     }).toThrow(Error);
 
     expect(() => {
-      batchedSubscribe('foo');
+      batchedSubscribe(42);
+    }).toThrow(Error);
+
+    expect(() => {
+      batchedSubscribe({ scheduler: 'foo' });
+    }).toThrow(Error);
+
+    expect(() => {
+      batchedSubscribe({ maxBatchDelay: -1 });
     }).toThrow(Error);
   });
 
@@ -233,5 +259,242 @@ describe('batchedSubscribe()', () => {
     expect(() =>
       store.subscribe(undefined)
     ).toThrow();
+  });
+
+  it('batches same-tick dispatches into one round via a custom scheduler', () => {
+    const scheduled = [];
+    const store = createBatchedStore({ scheduler: cb => scheduled.push(cb) });
+
+    const order = [];
+    store.subscribe(() => order.push('a'));
+    store.subscribe(() => order.push('b'));
+    store.subscribe(() => order.push('c'));
+
+    store.dispatch({ type: 'foo' });
+    store.dispatch({ type: 'foo' });
+    store.dispatch({ type: 'foo' });
+
+    expect(scheduled.length).toBe(1);
+    expect(order.length).toBe(0);
+    expect(store.getPendingCount()).toBe(3);
+
+    store.flush();
+
+    expect(order).toEqual(['a', 'b', 'c']);
+    expect(store.getPendingCount()).toBe(0);
+  });
+
+  it('flushes pending notifications when maxBatchDelay elapses', (done) => {
+    const store = createBatchedStore({ maxBatchDelay: 20 });
+    const spy = expect.createSpy();
+
+    store.subscribe(spy);
+    store.dispatch({ type: 'foo' });
+    store.dispatch({ type: 'foo' });
+
+    expect(spy.calls.length).toBe(0);
+
+    setTimeout(() => {
+      expect(spy.calls.length).toBe(1);
+      done();
+    }, 80);
+  });
+
+  it('clears the pending timer when flush fires first', (done) => {
+    const store = createBatchedStore({ maxBatchDelay: 20 });
+    const spy = expect.createSpy();
+
+    store.subscribe(spy);
+    store.dispatch({ type: 'foo' });
+    store.flush();
+
+    expect(spy.calls.length).toBe(1);
+
+    setTimeout(() => {
+      expect(spy.calls.length).toBe(1);
+      done();
+    }, 80);
+  });
+
+  it('does not notify twice on consecutive flush calls', () => {
+    const store = createBatchedStore({ scheduler: () => {} });
+    const spy = expect.createSpy();
+
+    store.subscribe(spy);
+    store.dispatch({ type: 'foo' });
+
+    store.flush();
+    store.flush();
+    store.flush();
+
+    expect(spy.calls.length).toBe(1);
+  });
+
+  it('flush without pending notifications is a no-op', () => {
+    const store = createBatchedStore({ scheduler: () => {} });
+    const spy = expect.createSpy();
+
+    store.subscribe(spy);
+    store.flush();
+
+    expect(spy.calls.length).toBe(0);
+  });
+
+  it('notifies remaining listeners and rethrows collected errors in order', () => {
+    const store = createBatchedStore({ scheduler: () => {} });
+
+    const errA = new Error('a');
+    const errB = new Error('b');
+    const order = [];
+    const spyC = expect.createSpy();
+
+    store.subscribe(() => {
+      order.push('a');
+      throw errA;
+    });
+    store.subscribe(() => {
+      order.push('b');
+      throw errB;
+    });
+    store.subscribe(() => {
+      order.push('c');
+      spyC();
+    });
+
+    store.dispatch({ type: 'foo' });
+
+    let caught = null;
+    try {
+      store.flush();
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(order).toEqual(['a', 'b', 'c']);
+    expect(spyC.calls.length).toBe(1);
+    expect(caught instanceof Error).toBe(true);
+    expect(caught.errors).toEqual([errA, errB]);
+
+    expect(() => store.flush()).toNotThrow();
+  });
+
+  it('collects listener errors in sync mode and throws from dispatch', () => {
+    const store = createBatchedStore();
+
+    const errA = new Error('a');
+    const spyB = expect.createSpy();
+
+    store.subscribe(() => {
+      throw errA;
+    });
+    store.subscribe(spyB);
+
+    let caught = null;
+    try {
+      store.dispatch({ type: 'foo' });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(spyB.calls.length).toBe(1);
+    expect(caught instanceof Error).toBe(true);
+    expect(caught.errors).toEqual([errA]);
+  });
+
+  it('does not notify unsubscribed listeners on flush and frees their slot', () => {
+    const store = createBatchedStore({ scheduler: () => {} });
+    const spyA = expect.createSpy();
+    const spyB = expect.createSpy();
+
+    const unsubscribeA = store.subscribe(spyA);
+    store.subscribe(spyB);
+
+    store.dispatch({ type: 'foo' });
+    expect(store.getPendingCount()).toBe(2);
+
+    unsubscribeA();
+    expect(store.getPendingCount()).toBe(1);
+
+    store.flush();
+
+    expect(spyA.calls.length).toBe(0);
+    expect(spyB.calls.length).toBe(1);
+    expect(store.getPendingCount()).toBe(0);
+  });
+
+  it('triggers only once when both scheduler and maxBatchDelay are given', (done) => {
+    const scheduled = [];
+    const store = createBatchedStore({
+      scheduler: cb => scheduled.push(cb),
+      maxBatchDelay: 20
+    });
+    const spy = expect.createSpy();
+
+    store.subscribe(spy);
+    store.dispatch({ type: 'foo' });
+
+    expect(scheduled.length).toBe(1);
+    scheduled[0]();
+
+    expect(spy.calls.length).toBe(1);
+
+    setTimeout(() => {
+      expect(spy.calls.length).toBe(1);
+      done();
+    }, 80);
+  });
+
+  it('lets maxBatchDelay win when it fires before the scheduler', (done) => {
+    let scheduledCb = null;
+    const store = createBatchedStore({
+      scheduler: cb => {
+        scheduledCb = cb;
+      },
+      maxBatchDelay: 20
+    });
+    const spy = expect.createSpy();
+
+    store.subscribe(spy);
+    store.dispatch({ type: 'foo' });
+
+    setTimeout(() => {
+      expect(spy.calls.length).toBe(1);
+      scheduledCb();
+      expect(spy.calls.length).toBe(1);
+      done();
+    }, 80);
+  });
+
+  it('does not arm a timer when a synchronous scheduler flushes immediately', () => {
+    const originalSetTimeout = global.setTimeout;
+    const setTimeoutSpy = expect.createSpy();
+    global.setTimeout = setTimeoutSpy;
+
+    try {
+      const store = createBatchedStore({
+        scheduler: cb => cb(),
+        maxBatchDelay: 20
+      });
+      const spy = expect.createSpy();
+
+      store.subscribe(spy);
+      store.dispatch({ type: 'foo' });
+
+      expect(spy.calls.length).toBe(1);
+      expect(setTimeoutSpy.calls.length).toBe(0);
+    } finally {
+      global.setTimeout = originalSetTimeout;
+    }
+  });
+
+  it('notifies synchronously with the latest state when nothing is configured', () => {
+    const store = batchedSubscribe()(createCounterStore)();
+    const seen = [];
+
+    store.subscribe(() => seen.push(store.getState()));
+    store.dispatch({ type: 'inc' });
+
+    expect(seen).toEqual([1]);
+    expect(store.getPendingCount()).toBe(0);
   });
 });
