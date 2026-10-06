@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>redux-batched-subscribe 状态面板</title>
+  <style>
+    body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; margin: 2em; background: #f6f8fa; color: #24292f; }
+    h1 { font-size: 1.3em; }
+    .panel { background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 1em 1.5em; max-width: 560px; }
+    .stat { display: flex; justify-content: space-between; padding: 0.4em 0; border-bottom: 1px solid #eaecef; }
+    .stat .value { font-weight: 600; font-variant-numeric: tabular-nums; }
+    button { margin: 0.8em 0.5em 0 0; padding: 0.5em 1.2em; border: 1px solid #0969da; border-radius: 6px; background: #0969da; color: #fff; cursor: pointer; }
+    button.secondary { background: #fff; color: #0969da; }
+    #last-error { color: #cf222e; min-height: 1.4em; margin-top: 0.8em; }
+    #log { margin-top: 1em; font-size: 0.85em; color: #57606a; max-height: 160px; overflow-y: auto; }
+    #log div { padding: 1px 0; }
+  </style>
+</head>
+<body>
+  <h1>redux-batched-subscribe 状态面板</h1>
+  <div class="panel">
+    <div class="stat"><span>累计 dispatch</span><span class="value" id="dispatch-count">0</span></div>
+    <div class="stat"><span>listener 触发次数</span><span class="value" id="listener-count">0</span></div>
+    <div class="stat"><span>待通知订阅数</span><span class="value" id="pending-count">0</span></div>
+    <div class="stat"><span>当前 state</span><span class="value" id="state-value">0</span></div>
+    <div>
+      <button id="dispatch-btn">Dispatch</button>
+      <button id="flush-btn" class="secondary">手动 Flush</button>
+    </div>
+    <div id="last-error"></div>
+    <div id="log"></div>
+  </div>
+
+  <script>
+    // 让浏览器直接加载 npm run build 产出的真实模块（CommonJS 格式）。
+    var module = { exports: {} };
+    var exports = module.exports;
+  </script>
+  <script src="../lib/index.js"></script>
+  <script>
+    (function () {
+      var batchedSubscribe = module.exports.batchedSubscribe;
+
+      // 一个极简的 redux 风格 base store。
+      function createBaseStore() {
+        var state = 0;
+        return {
+          dispatch: function (action) { state += 1; return action; },
+          getState: function () { return state; },
+          subscribe: function () {}
+        };
+      }
+
+      var store = batchedSubscribe({ maxBatchDelay: 1500 })(createBaseStore)();
+
+      var dispatchCount = 0;
+      var listenerCount = 0;
+
+      var el = {
+        dispatch: document.getElementById('dispatch-count'),
+        listener: document.getElementById('listener-count'),
+        pending: document.getElementById('pending-count'),
+        state: document.getElementById('state-value'),
+        error: document.getElementById('last-error'),
+        log: document.getElementById('log')
+      };
+
+      function log(message) {
+        var line = document.createElement('div');
+        line.textContent = new Date().toLocaleTimeString() + ' ' + message;
+        el.log.insertBefore(line, el.log.firstChild);
+      }
+
+      function render() {
+        el.dispatch.textContent = dispatchCount;
+        el.listener.textContent = listenerCount;
+        el.pending.textContent = store.getPendingListenerCount();
+        el.state.textContent = store.getState();
+      }
+
+      function showError(err) {
+        el.error.textContent = err ? ('通知错误: ' + err.message) : '';
+      }
+
+      // 普通订阅者。
+      store.subscribe(function () {
+        listenerCount += 1;
+        log('普通订阅者收到通知，state=' + store.getState());
+      });
+
+      // 固定抛错的订阅者。
+      store.subscribe(function () {
+        listenerCount += 1;
+        log('固定抛错的订阅者被触发');
+        throw new Error('固定抛错的订阅者');
+      });
+
+      window.onerror = function (message) {
+        showError({ message: message });
+        render();
+      };
+
+      document.getElementById('dispatch-btn').addEventListener('click', function () {
+        store.dispatch({ type: 'INCREMENT' });
+        dispatchCount += 1;
+        log('dispatch #' + dispatchCount);
+        render();
+      });
+
+      document.getElementById('flush-btn').addEventListener('click', function () {
+        try {
+          store.flush();
+          showError(null);
+          log('手动 flush');
+        } catch (err) {
+          showError(err);
+          log('手动 flush 抛出错误: ' + err.message);
+        }
+        render();
+      });
+
+      // 超时自动 flush 不会改变 DOM 事件循环，这里周期性刷新计数。
+      setInterval(render, 100);
+      render();
+
+      // 自动化自检：?autotest=1 时连点几下，便于无头浏览器验证计数。
+      if (/[?&]autotest=1/.test(location.search)) {
+        var dispatchBtn = document.getElementById('dispatch-btn');
+        var flushBtn = document.getElementById('flush-btn');
+        dispatchBtn.click();
+        dispatchBtn.click();
+        dispatchBtn.click();
+        flushBtn.click();
+        dispatchBtn.click();
+        setTimeout(function () {
+          flushBtn.click();
+          render();
+          document.title = 'autotest-done';
+        }, 50);
+      }
+    })();
+  </script>
+</body>
+</html>
